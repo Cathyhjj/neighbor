@@ -1,316 +1,387 @@
-# %%
+
+# -----------------------------------------------------------------------------
+# :author:    Juanjuan Huang
+# :email:     juanjuan.huang@anl.gov
+# :copyright: Copyright © 2023, UChicago Argonne, LLC
+# -----------------------------------------------------------------------------
+
 import py3Dmol
 import numpy as np
 import matplotlib.pyplot as plt
+# from IPython.display import display
+from ipyfilechooser import FileChooser
+# import re
+import ase
+from ase.io import read
+from ase.io import write
+import plotly.graph_objects as go
+import copy
+from pprint import pprint
+import ipywidgets as widgets
+from IPython.display import display, clear_output
+import os
 
-xyz = '''59
-
-O -5.301403 -2.601292 -0.500298
-O -3.367214 -1.231646 -1.809521
-O -4.379644 0.010097 0.793594
-O -2.460089 -3.700719 -0.252618
-Pb -3.419867 -1.845311 0.270488
-O -3.472519 -2.458976 2.350497
-O -1.538331 -1.089330 1.041273
-O -2.550761 0.152413 3.644388
-O -0.631206 -3.558404 2.598176
-Pb -1.590983 -1.702995 3.121282
-O -1.643635 -2.316661 5.201291
-O 0.290553 -0.947014 3.892068
-O -3.346703 0.952956 -3.947334
-O -4.359133 2.194699 -1.344219
-O -2.424945 3.564345 -2.653442
-O -3.437375 4.806088 -0.050327
-O -1.517820 1.095271 -1.096539
-Pb -2.477597 2.950680 -0.573433
-O -2.530250 2.337014 1.506576
-O -0.596062 3.706661 0.197353
-O -1.608492 4.948403 2.800468
-O 0.311064 1.237587 1.754256
-Pb -4.068581 1.247684 2.547849
-Pb -0.648714 3.092995 2.277362
-O -0.701366 2.479330 4.357371
-O 1.232822 3.848976 3.048147
-O 2.139947 1.379903 4.605050
-O -2.139947 -1.379903 -4.605050
-O -1.232822 -3.848976 -3.048147
-O 0.701366 -2.479330 -4.357371
-O -0.311064 -1.237587 -1.754256
-O 1.608492 -4.948403 -2.800468
-Pb 0.648714 -3.092995 -2.277362
-O 0.596062 -3.706661 -0.197353
-O 2.530250 -2.337014 -1.506576
-O 1.517820 -1.095271 1.096539
-O 3.437375 -4.806088 0.050327
-Pb -0.942269 -4.795991 0.843921
-Pb 2.477597 -2.950680 0.573433
-O 2.424945 -3.564345 2.653442
-O 4.359133 -2.194699 1.344219
-O 3.346703 -0.952956 3.947334
-O -0.290553 0.947014 -3.892068
-O 1.643635 2.316661 -5.201291
-O 0.631206 3.558404 -2.598176
-O 2.550761 -0.152413 -3.644388
-Pb -1.828884 -0.142316 -2.850795
-Pb 1.590983 1.702995 -3.121282
-O 1.538331 1.089330 -1.041273
-O 3.472519 2.458976 -2.350497
-O 2.460089 3.700719 0.252618
-O 4.379644 -0.010097 -0.793594
-Pb 0.000000 0.000000 0.000000
-Pb 3.419867 1.845311 -0.270488
-O 3.367214 1.231646 1.809521
-O 5.301403 2.601292 0.500298
-Pb 1.828884 0.142316 2.850795
-Pb 0.942269 4.795991 -0.843921
-Pp 4.068581 -1.247684 -2.547849
-'''
-
-# %%
-compound = xyz.split('\n')[2:-1]
-xyz_sorted = [compound[i].split(" ") for i in range(len(compound))]
-elements = [xyz_sorted[i][0] for i in range(len(compound))]
-coordinates = [np.array([float(xyz_sorted[i][1]),
-                         float(xyz_sorted[i][2]), 
-                         float(xyz_sorted[i][3])]) for i in range(len(compound))]
-
-# %%
-def calculate_distance(coord1, coord2):
-    return np.sqrt((coord2[0] - coord1[0])**2 + (coord2[1] - coord1[1])**2 + (coord2[2] - coord1[2])**2)
+class ClusterNeighbor(object):
+    def __init__(self):
+        pass
+    
+    def _calculate_distance(self, coord1, coord2):
+        return np.sqrt((coord2[0] - coord1[0])**2 + (coord2[1] - coord1[1])**2 + (coord2[2] - coord1[2])**2)
 
 
-num_atoms = len(elements)
-output = {"distance_all":[],
-          "pairs_all":[]}
-for i in range(num_atoms):
-    atom_i = elements[i]
-    for j in range(i + 1, num_atoms):
-        atom_j = elements[j]
-        distance = calculate_distance(coordinates[i], coordinates[j])
-        output['distance_all'].append(distance)
-        output['pairs_all'].append(f"{atom_i}-{atom_j}")
-        print(f"{atom_i}-{atom_j}: {distance} Å")
+    def load_xyz(self, from_file=True, path=None,  atom_object=None):
+        if from_file is True:
+            self.atoms = read(path)
+        else:
+            self.atoms = atom_object
+        self.elements = [self.atoms[i].symbol for i in range(len(self.atoms))]
+        self.elements_num = {element_i: self.elements.count(element_i) for element_i in set(self.elements)}
+        self.element_index_group = {element_set_i: [i for i, element_i in enumerate(self.elements) if element_i == element_set_i] for element_set_i in set(self.elements)}
+        self.center = self.atoms.get_center_of_mass()
+        
+        self.xyz_string = f"{len(self.atoms)}\n\n" 
+        for atom in self.atoms:
+            self.xyz_string += f"{atom.symbol} {atom.position[0]} {atom.position[1]} {atom.position[2]}\n"
+        
+    def expand_cif(self, replication_factors = (2, 2, 2)):
+        expanded_cluster = self.atoms.repeat(replication_factors)
+        return expanded_cluster
+    
+    def view_xyz(self, style_all=None, highlight_atom1="O", highlight_atom2="Pb", label=True):
+        self.view = py3Dmol.view(width=500,height=500)
+        self.view.addModel(self.xyz_string,'xyz',)
+        if style_all is None:
+            style_all = {'stick':{'radius':.1, 'alpha':0.2, 'color':'gray'}, 
+                         'sphere': {'radius':.3}
+                        }
+        self.view.setStyle(style_all)
+        
+        self.view.addStyle({'atom': highlight_atom1}, 
+                           {'sphere': {'color': 'red', 'radius': 0.5}})  
+        
+        self.view.addStyle({'atom': highlight_atom2}, 
+                           {'sphere': {'color': 'blue', 'radius': 0.3}})  
+        self.view.setBackgroundColor('0xeeeeee')
+        if label:
+            for i, atom_i in enumerate(self.atoms):
+                self.view.addLabel(f"{i}", {'position': {'x': atom_i.position[0], 'y': atom_i.position[1], 'z': atom_i.position[2]}, 
+                                    'fontColor': 'k', 'fontSize': 12, 'backgroundColor': 'white', 'backgroundOpacity':0.5})
+        self.view.zoomTo()
+        self.view.show()
+        self.view.title(self.atoms.get_chemical_formula())
+    
+    def get_cluster_size(self):
+        self.cluster_size = self.atoms.get_all_distances().max()/2
+        # print(f"Cluster size is {self.cluster_size} A")
+        return self.cluster_size
+    
+    def shrink_cluster_size(self, new_radius=None):
+        if new_radius is None:
+            new_radius = self.cluster_size - 0.1
+        
+        atoms_smaller = copy.deepcopy(self.atoms)
+        indices_remove_lst = []
+        for i, atom_i in enumerate(atoms_smaller):
+            radius_i = np.abs(self._calculate_distance(self.atoms.get_positions()[i], self.center))
+            if radius_i > new_radius:
+                indices_remove_lst.append(i)
 
-# %%
-O_O = ['O-O']
-Pb_O = ['Pb-O', 'O-Pb', 'Pp-O', 'O-Pp']
-Pb_Pb = ['Pb-Pb', 'Pp-Pb']
+        atoms_smaller = self.remove_atoms(indices_remove_lst)
+        return atoms_smaller
+    
+    def remove_atoms(self, indices_remove_lst=[-1]):
+        indices_keep_lst = [i for i in range(len(self.atoms)) if i not in indices_remove_lst]
+        atoms_new = self.atoms[indices_keep_lst]
+        return atoms_new
 
-pairs_sorted = {"O-O":[],
-                "Pb-Pb":[],
-                "Pb-O":[]}
+    def get_pairs(self):
+        self.pairs_index = [(i, j) for i in range(len(self.atoms)) for j in range(i + 1, len(self.atoms))]
+        # self.pairs_index = [(i, j) for i in range(len(self.atoms)) for j in range(len(self.atoms))]
+        self.pairs_element = [sorted([self.atoms[i].symbol, self.atoms[j].symbol]) for i, j in self.pairs_index]
+        self.pairs = [f"{atom_i}-{atom_j}" for atom_i, atom_j in self.pairs_element]
+        self.pairs_unique = [f"{self.atoms[i].symbol}({self.atoms[i].index})-{self.atoms[j].symbol}({self.atoms[j].index})" for i, j in self.pairs_index]
+        self.distance_all = [self.atoms.get_all_distances()[i][j] for i, j in self.pairs_index]
+        self.pairs_types = set(self.pairs)
+        
+        self.pairs_group = {key: {'pairs_index':[],
+                                  'pairs':[],
+                                  'pairs_unique':[],
+                                  'distance':[]} for key in self.pairs_types}
+        
+        for i in range(len(self.pairs)):
+            self.pairs_group[self.pairs[i]]['pairs_index'].append(self.pairs_index[i])
+            self.pairs_group[self.pairs[i]]['pairs_unique'].append(self.pairs_unique[i])
+            self.pairs_group[self.pairs[i]]['distance'].append(self.distance_all[i])
+        return self.pairs_group
 
-for index, element in enumerate(output['pairs_all']):
-    if element in O_O:
-        pairs_sorted["O-O"].append(output['distance_all'][index])
-    elif element in Pb_O:
-        pairs_sorted["Pb-O"].append(output['distance_all'][index])
-    elif element in Pb_Pb:
-        pairs_sorted["Pb-Pb"].append(output['distance_all'][index])
+    def get_CN(self, center_atom=None, CN_atom=None, error_bar=0.01, CN_range=5, printit=True):
+        if not hasattr(self, 'pairs_types'):
+            self.get_pairs()
+            
+        # if not hasattr(self, 'CN_distances'):
+        self.CN_distances = {}
+        self.CN = {}
+                    
+        if center_atom is None:
+            center_atom = self.atoms[0].symbol
+        
+        if CN_atom is None:
+            CN_atom = self.atoms[1].symbol
+            
+        bond_type = f"{center_atom}-{CN_atom}"                
+        center_atom_index = self.element_index_group[center_atom]
+        CN_atom_index = self.element_index_group[CN_atom]
+        
+        distances_all = np.asarray([self.atoms.get_distances(atom_i, CN_atom_index) for atom_i in center_atom_index])
+        distance_sorted = np.sort(distances_all.flatten())      
+        distance_sorted = distance_sorted[distance_sorted!=0]
+        distance_sorted = distance_sorted[distance_sorted<CN_range]
+        
+        diff = np.diff(distance_sorted)
+        indices = np.where(diff > error_bar)[0] + 1
+        self.CN_distances[bond_type] = np.split(distance_sorted, indices)
+        self.CN[bond_type] = {np.average(group): group.shape[0]/self.elements_num[center_atom] for group in self.CN_distances[bond_type]}
+        if printit is True:
+            pprint(self.CN)
+        return self.CN
+    
+    def plot_hist(self, binsize=0.2):
+        if not hasattr(self, 'pairs_types'):
+            self.get_pairs()
+            
+        fig = go.Figure()
+        for key_i in self.pairs_group.keys():
+            fig.add_trace(go.Histogram(x=self.pairs_group[key_i]['distance'], name=key_i, opacity=0.6, 
+                                    xbins={'size':binsize},marker={'line':{'color':'white','width':2}}))
 
+        fig.update_layout(
+            xaxis_title_text='Distances [A]', yaxis_title_text='pairs',
+            plot_bgcolor='rgba(0.02,0.02,0.02,0.02)',  # Transparent plot background
+            xaxis={'tickmode':'auto'}, barmode='overlay',  # Overlay histograms,
+            width=600, height=400)
+        fig.show()
 
-# %%
-plt.figure()
-plt.hist(output['distance_all'], bins=30, color='navy', alpha=0.3,edgecolor='gray')
-plt.xlabel("Distance [Å]")
-plt.ylabel("Number of pairs")
-plt.ylim(0, 180)
-plt.figure()
-
-
-plt.hist(pairs_sorted["O-O"], bins=30, color='red', alpha=0.3, edgecolor='white', label='O-O pairs')
-plt.hist(pairs_sorted["Pb-O"], bins=20, color='olive', alpha=0.3,edgecolor='white', label='Pb-O pairs')
-plt.hist(pairs_sorted["Pb-Pb"], bins=20, color='purple', alpha=0.5,edgecolor='white',  label='Pb-Pb pairs')
-plt.xlabel("Distance [Å]")
-plt.ylabel("Number of pairs")
-plt.legend()
-plt.ylim(0, 180)
-plt.show()
-
-# %%
-xyzview = py3Dmol.view(width=400,height=400)
-xyzview.addModel(xyz,'xyz',)
-xyzview.setStyle({'stick':{'radius':.1, 'alpha':0.2, 'color':'gray'}, 
-                  'sphere': {'radius':.3}
-                  }
-                 )
-
-xyzview.addStyle({'atom': 'O'}, 
-                 {'sphere': {'color': 'blue', 'radius': 0.3}})  
-
-xyzview.addStyle({'atom': 'Pb'}, 
-                 {'sphere': {'color': 'red', 'radius': 0.5}})  
-
-xyzview.addStyle({'atom': 'Pp'}, 
-                 {'sphere': {'color': 'yellow', 'radius': 0.5}})  
-
-
-xyzview.setBackgroundColor('0xeeeeee')
-xyzview.zoomTo()
-xyzview.show()
-
-# %%
-# Create a view object
-view = py3Dmol.view(width=800, height=400)
-view.addModel(xyz, 'xyz')
-
-# Style the entire molecule
-view.setStyle({'stick': {}})
-
-# Change color of a specific atom (e.g., the 5th atom in the file, index 4)
-# Note: Py3Dmol's atom indexing starts from 1
-view.setStyle({'atomIndex': 1}, {'sphere': {'color': 'red', 'radius': 1}})
-
-# Update the view
-view.zoomTo()
-view.show()
-
-# %%
-import py3Dmol
-
-# Create a view object
-view = py3Dmol.view(query='pdb:1ycr')  # Load a molecule, for example, PDB ID 1ycr
-
-# Style the molecule
-# view.setStyle({'cartoon': {'color': 'spectrum'}})  # General style for the molecule
-
-# Change color of a specific carbon atom
-# Replace 'resi' and 'chain' with the appropriate residue number and chain identifier
-# and 'atomIndex' with the index of the carbon atom you want to target
-view.addStyle({'atom': 'C', 'resi': 90, 'chain': 'A'}, {'sphere': {'color': 'blue', 'radius': 0.6}})
-
-# Show the molecule
-view.show()
-
-
-
-# %% [markdown]
-# Display local file.
-
-# %%
-benz='''
-     RDKit          3D
-
-  6  6  0  0  0  0  0  0  0  0999 V2000
-   -0.9517    0.7811   -0.6622 C   0  0  0  0  0  0  0  0  0  0  0  0
-    0.2847    1.3329   -0.3121 C   0  0  0  0  0  0  0  0  0  0  0  0
-    1.2365    0.5518    0.3512 C   0  0  0  0  0  0  0  0  0  0  0  0
-    0.9517   -0.7811    0.6644 C   0  0  0  0  0  0  0  0  0  0  0  0
-   -0.2847   -1.3329    0.3144 C   0  0  0  0  0  0  0  0  0  0  0  0
-   -1.2365   -0.5518   -0.3489 C   0  0  0  0  0  0  0  0  0  0  0  0
-  1  2  2  0
-  2  3  1  0
-  3  4  2  0
-  4  5  1  0
-  5  6  2  0
-  6  1  1  0
-M  END
-$$$$'''
-view = py3Dmol.view(data=benz,
-                    style={'stick':{'colorscheme':'cyanCarbon'}}
-                    )
-view.show()
-
-# %%
-view = py3Dmol.view(query='pdb:1dc9',linked=False,viewergrid=(2,2))
-view.setViewStyle({'style':'outline','color':'black','width':0.1})
-view.setStyle({'cartoon':{'arrows':True, 'tubes':True, 'style':'oval', 'color':'white'}},viewer=(0,1))
-view.setStyle({'stick':{'colorscheme':'greenCarbon'}},viewer=(1,0))
-view.setStyle({'cartoon':{'color':'spectrum'}},viewer=(1,1))
-view.removeAllModels(viewer=(0,0))
-view.addModel(benz,'sdf',viewer=(0,0))
-view.setStyle({'stick':{}},viewer=(0,0))
-view.zoomTo(viewer=(0,0))
-view.render()
-
-
-# %%
-view = py3Dmol.view(query='pdb:1ycr')
-chA = {'chain':'A'}
-chB = {'chain':'B'}
-view.setStyle(chA,{'cartoon': {'color':'spectrum'}})
-view.addSurface(py3Dmol.VDW,{'opacity':0.7,'color':'white'}, chA)
-view.setStyle(chB,{'stick':{}})
-view.show()
-
-# %%
-view = py3Dmol.view(query='pdb:5ire',options={'doAssembly':True})
-view.setStyle({'cartoon':{'color':'spectrum'}})
-view.show()
-
-# %% [markdown]
-# Color by temperature factors
-
-# %%
-view = py3Dmol.view(query='pdb:1ycr')
-view.setStyle({'cartoon': {'color':'white'}})
-view.addSurface(py3Dmol.VDW,{'opacity':0.7,'colorscheme':{'prop':'b','gradient':'sinebow','min':0,'max':70}})
-
-# %%
-import requests, base64
-r = requests.get('https://mmtf.rcsb.org/v1.0/full/5lgo')
-view = py3Dmol.view()
-view.addModel(base64.b64encode(r.content).decode(),'mmtf')
-view.addUnitCell()
-view.zoomTo()
-
-# %% [markdown]
-# Specifying individual styles for a viewer grid in the constructor
-
-# %%
-view = py3Dmol.view(query='pdb:1dc9',viewergrid=(2,2),style=[[{'stick':{}},{'cartoon':{'arrows':True, 'tubes':True, 'style':'oval', 'color':'white'}}],
-                                                            [{'stick':{'colorscheme':'greenCarbon'}},{'cartoon':{'color':'spectrum'}}]])
-view.show()
-
-# %% [markdown]
-# It isn't possible to convert Python functions to Javascript functions, but Javascript code can be provided in string form to click/hover callbacks.
-
-# %%
-v = py3Dmol.view(query="pdb:1ubq",style={'cartoon':{},'stick':{}})
-v.setHoverable({},True,'''function(atom,viewer,event,container) {
-                   if(!atom.label) {
-                    atom.label = viewer.addLabel(atom.resn+":"+atom.atom,{position: atom, backgroundColor: 'mintcream', fontColor:'black'});
-                   }}''',
-               '''function(atom,viewer) {
-                   if(atom.label) {
-                    viewer.removeLabel(atom.label);
-                    delete atom.label;
-                   }
-                }''')
-
-# %% [markdown]
-# An existing viewer can be modified from different cells with `update`
-
-# %%
-benz='''
-     RDKit          3D
-
-  6  6  0  0  0  0  0  0  0  0999 V2000
-   -0.9517    0.7811   -0.6622 C   0  0  0  0  0  0  0  0  0  0  0  0
-    0.2847    1.3329   -0.3121 C   0  0  0  0  0  0  0  0  0  0  0  0
-    1.2365    0.5518    0.3512 C   0  0  0  0  0  0  0  0  0  0  0  0
-    0.9517   -0.7811    0.6644 C   0  0  0  0  0  0  0  0  0  0  0  0
-   -0.2847   -1.3329    0.3144 C   0  0  0  0  0  0  0  0  0  0  0  0
-   -1.2365   -0.5518   -0.3489 C   0  0  0  0  0  0  0  0  0  0  0  0
-  1  2  2  0
-  2  3  1  0
-  3  4  2  0
-  4  5  1  0
-  5  6  2  0
-  6  1  1  0
-M  END
-$$$$'''
-view = py3Dmol.view()
-view.addModel(benz,'sdf')
-view.setStyle({'stick':{}})
-view.zoomTo()
-view.show()
-
-# %% [markdown]
-# However, **this does not work in colab** because colab sandboxes the JavaScript environments of each cell.
-
-# %%
-view.setStyle({'stick':{'color':'blue'}})
-view.update()
+class ButtonOutputManager:
+    def __init__(self):
+        self.fc = FileChooser()
+        self.fc.register_callback(self.on_file_selected)
+        self.output_file = widgets.Output()
+        self.fc_box = widgets.HBox([self.fc, self.output_file])
+        self.cluster_lst = {}
+        
+        self._button_layout = widgets.Layout(width='210px', height='25px')
+        self._button_layout_narrow = widgets.Layout(width='170px', height='25px')
+        self._box_layout = widgets.Layout(display='fixed', 
+                                          align_items='center', 
+                                          justify_content='flex-start',
+                                          )
 
 
+    def init_menu(self):
+        self.output_show = widgets.Output()
+        self.output_hist = widgets.Output()
+        self.output_getCN = widgets.Output()
+        
+        self.button_show = widgets.Button(description="Show", layout=self._button_layout_narrow)
+        self.button_hist = widgets.Button(description="Plot histogram", layout=self._button_layout_narrow)
+        self.button_getCN = widgets.Button(description="Calculate CN", layout=self._button_layout)
+        
+        self.add_menu_CN()
+        self.add_menu_resize()
+        self.add_menu_show()
+
+        
+        self.menu_box = widgets.HBox([self.box_menu_show,
+                                      self.box_menu_CN,
+                                      self.box_menu_resize,
+                                     ])
+
+        self.output_box = widgets.VBox([self.output_show, 
+                                        self.output_hist, 
+                                        self.output_getCN])
+        
+    def update_menu(self):
+        options_atoms = [(element, i) for i, element in enumerate(self.cluster.elements_num.keys())]
+        self.dropdown_CN_center_atom.options = options_atoms
+        self.dropdown_CN_neighbor_atom.options = options_atoms
+        self.dropdown_CN_center_atom.value = 0
+        self.dropdown_CN_neighbor_atom.value = 0
+        self.content_text_shrink_radius.value = self.cluster.get_cluster_size()
+        
+        self.button_undo_changes.on_click(self.on_button_undo_changes_clicked)
+        self.button_show.on_click(self.on_button_show_clicked)
+        self.button_hist.on_click(self.on_button_hist_clicked)
+        self.button_getCN.on_click(self.on_button_getCN_clicked)
+        self.button_shrink.on_click(self.on_button_shrink_clicked)
+        self.button_save.on_click(self.on_button_save_clicked)
+        self.button_expand.on_click(self.on_button_expand_clicked)
+        self.button_remove_atoms.on_click(self.on_button_remove_atoms_clicked)
+        self.button_clear.on_click(self.on_button_clear_outpout)
+
+    def add_menu_show(self):
+        self.dropdown_view_checkbox_label = widgets.Checkbox(value=True,  description='Labels', disabled=False, layout=widgets.Layout(width='150px'))
+        # options_atoms = [(element, i) for i, element in enumerate(self.cluster.elements_num.keys())]
+        # self.dropdown_view_highlight_atom1 = widgets.Dropdown(options=options_atoms, value=0, description='Red', layout=widgets.Layout(width='150px'))
+        # self.dropdown_view_highlight_atom2 = widgets.Dropdown(options=options_atoms, value=0, description='Blue', layout=widgets.Layout(width='150px'))
+        self.content_text_save = widgets.Text(value="Filename", placeholder='File name', description='Save name', disabled=False, layout=widgets.Layout(width='160px'))        
+        self.button_save = widgets.Button(description="Save to xyz", layout=self._button_layout_narrow)
+        self.button_clear = widgets.Button(description="Clear output", layout=self._button_layout_narrow)
+
+        self.box_menu_show = widgets.VBox([self.button_show,
+                                           self.dropdown_view_checkbox_label,
+                                           # self.dropdown_view_highlight_atom1,
+                                           # self.dropdown_view_highlight_atom2,
+                                           self.button_hist, 
+                                           self.button_save,
+                                           self.content_text_save,
+                                           self.button_clear
+                                           ])
+        
+    def add_menu_resize(self):
+        self.button_shrink = widgets.Button(description="Shrink cluster", layout=self._button_layout)
+        self.content_text_shrink_radius = widgets.FloatText(value=0, placeholder='Radius [A]', description='Radius [A]', disabled=False, step=1, layout=widgets.Layout(width='160px'))
+        self.button_expand = widgets.Button(description="Expand CIF", layout=self._button_layout)
+        self.content_text_expand_factors_x = widgets.IntText(value=2, placeholder='x', description='x factor', disabled=False, step=1, layout=widgets.Layout(width='160px', align_items='stretch'))
+        self.content_text_expand_factors_y = widgets.IntText(value=2, placeholder='y', description='y factor', disabled=False, step=1, layout=widgets.Layout(width='160px'))
+        self.content_text_expand_factors_z = widgets.IntText(value=2, placeholder='z', description='z factor', disabled=False, step=1, layout=widgets.Layout(width='160px'))
+        # self.content_text_expand_cif = widgets.FloatText(value=0, placeholder='Radius [A]', description='Radius [A]', disabled=False, step=1, layout=widgets.Layout(width='160px'))
+        self.button_undo_changes = widgets.Button(description="Undo changes", layout=self._button_layout)
+        self.button_remove_atoms = widgets.Button(description="Remove atoms", layout=self._button_layout)
+        self.content_text_remove_atoms = widgets.Text(value='', placeholder='e.g. 1, 2, 3', description='atom indices', disabled=False, layout=widgets.Layout(width='160px', align_items='stretch'))
+        
+        self.box_menu_resize = widgets.VBox([self.button_shrink,
+                                             self.content_text_shrink_radius,
+                                             self.button_expand,
+                                             widgets.VBox([self.content_text_expand_factors_x, 
+                                                           self.content_text_expand_factors_y, 
+                                                           self.content_text_expand_factors_z], layout=widgets.Layout(width='100%', ajustify_content='flex-start')),
+                                             self.button_remove_atoms,
+                                             self.content_text_remove_atoms,
+                                             self.button_undo_changes,
+                                            ])
+        
+        
+    def add_menu_CN(self):
+        options = []
+        self.dropdown_CN_center_atom = widgets.Dropdown(options=options, value=None, description='Center atom', layout=widgets.Layout(width='180px'))
+        self.dropdown_CN_neighbor_atom = widgets.Dropdown(options=options, value=None, description='Neighbor atom', layout=widgets.Layout(width='180px'))
+        self.content_text_CN_accuracy = widgets.FloatText(value=0.01, placeholder='Accuracy [A]', description='Accuracy [A]', disabled=False, step=0.01, layout=widgets.Layout(width='180px'))
+        self.content_text_CN_range = widgets.FloatText(value=6, placeholder='Range [A]', description='Range [A]', disabled=False, step=1, layout=widgets.Layout(width='180px'))
+        
+        self.box_menu_CN = widgets.VBox([self.button_getCN, 
+                                         self.dropdown_CN_center_atom,
+                                         self.dropdown_CN_neighbor_atom,
+                                         self.content_text_CN_accuracy,
+                                         self.content_text_CN_range
+                                        ], layout=self._box_layout)
+        
+    def init_display(self):
+        display(self.fc_box)
+        self.init_menu()
+        display(self.menu_box)
+        display(self.output_box)
+
+    def on_button_remove_atoms_clicked(self, b):
+        remove_indices_str = self.content_text_remove_atoms.value
+        try:
+            remove_indices_lst = [int(i.strip()) for i in remove_indices_str.split(',')]
+            # print("Processed list of integers:", remove_indices_lst)
+            cluster_atoms_removed = self.cluster.remove_atoms(remove_indices_lst)
+            self.cluster.load_xyz(from_file=False, atom_object=cluster_atoms_removed)
+            self.on_button_show_clicked(b=None)
+            self.content_text_shrink_radius.value = self.cluster.get_cluster_size()
+        except:
+            with self.output_show:
+                clear_output()
+                print("Invalid input. Please enter a comma-separated list of numbers.")
+
+    def on_button_show_clicked(self, b):
+        with self.output_show:
+            clear_output()
+            self.cluster.view_xyz(#highlight_atom1=self.dropdown_view_highlight_atom1.label, 
+                                  #highlight_atom2=self.dropdown_view_highlight_atom1.label, 
+                                  label=self.dropdown_view_checkbox_label.value)
+          
+    def on_button_hist_clicked(self,b):
+        with self.output_hist:
+            clear_output()           
+            if not hasattr(self, 'pairs_types'):
+                self.cluster.get_pairs()
+            
+            plt.figure(figsize=(8,3))
+            for key_i in self.cluster.pairs_group.keys():
+                plt.hist(self.cluster.pairs_group[key_i]['distance'], bins=80, alpha=0.3, edgecolor='white', label=key_i)
+            plt.xlabel("Distance [Å]")
+            plt.ylabel("Number of pairs")
+            plt.legend()
+            plt.tight_layout()
+            plt.show()
+            
+    def on_button_getCN_clicked(self, b):
+        with self.output_getCN:
+            clear_output()
+            self.cluster.get_CN(center_atom=self.dropdown_CN_center_atom.label, 
+                                CN_atom=self.dropdown_CN_neighbor_atom.label, 
+                                error_bar=self.content_text_CN_accuracy.value, 
+                                CN_range=self.content_text_CN_range.value, 
+                                printit=True)
+            
+    def on_file_selected(self, chooser):
+        with self.output_file:
+            clear_output()
+            print(f"File selected: {chooser.selected}")
+            self.cluster = ClusterNeighbor()
+            self.cluster.load_xyz(path=self.fc.value)
+            self.update_menu()       
+
+    def clear_output_windows(self):
+        with self.output_show:
+            clear_output()
+        with self.output_hist:
+            clear_output()
+        with self.output_getCN:
+            clear_output()  
+    
+    def on_button_clear_outpout(self, b):
+         self.clear_output_windows()
+         
+    def on_button_undo_changes_clicked(self, b):
+        self.cluster.load_xyz(path=self.fc.value)       
+        # self.clear_output_windows()
+        self.on_button_show_clicked(b=None)
+        self.content_text_shrink_radius.value = self.cluster.get_cluster_size()
+
+    
+    def on_button_shrink_clicked(self, b):
+        new_radius = self.content_text_shrink_radius.value        
+        # self.cluster.load_xyz(path=self.fc.value)
+        
+        if new_radius < self.cluster.get_cluster_size():
+            cluster_shrunk = self.cluster.shrink_cluster_size(new_radius=new_radius)
+            self.cluster.load_xyz(from_file=False, atom_object=cluster_shrunk)
+            # self.clear_output_windows()
+            self.on_button_show_clicked(b=None)
+        else:
+            with self.output_show:
+                clear_output()
+                print("Should use a radius smaller than cluster size!")
+    
+    def on_button_expand_clicked(self, b):
+        replication_factors = (self.content_text_expand_factors_x.value, 
+                               self.content_text_expand_factors_y.value, 
+                               self.content_text_expand_factors_z.value)
+        try:
+            cluster_expanded = self.cluster.expand_cif(replication_factors=replication_factors)
+            self.cluster.load_xyz(from_file=False, atom_object=cluster_expanded)
+            self.on_button_show_clicked(b=None)
+            self.content_text_shrink_radius.value = self.cluster.get_cluster_size()
+        except ValueError:
+            with self.output_show:
+                clear_output()
+                print("it's NOT a CIF, cannot expand!")
+        
+    def on_button_save_clicked(self, b):
+        self.cwd = os.path.dirname(self.fc.value)
+        filename = os.path.join(self.cwd, self.content_text_save.value + '.xyz')
+        print(f"save to {filename}")
+        write(filename, self.cluster.atoms)
