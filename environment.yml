@@ -1,0 +1,18 @@
+name: neighbor
+channels:
+  - defaults
+  - conda-forge 
+dependencies:
+  - python=3.8
+  - numpy
+  - matplotlib
+  - scipy
+  - pip:
+    - pip
+    - ase
+    - py3Dmol
+    - ipyfilechooser
+    - pprint
+    - ipywidgets
+    - IPython
+    - os

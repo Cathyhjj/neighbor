@@ -1,6 +1,6 @@
 
 # -----------------------------------------------------------------------------
-# :author:    Juanjuan Huang
+# :author:    Juanjuan Huang & Shelly D. Kelly
 # :email:     juanjuan.huang@anl.gov
 # :copyright: Copyright © 2023, UChicago Argonne, LLC
 # -----------------------------------------------------------------------------
