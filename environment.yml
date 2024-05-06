@@ -7,8 +7,8 @@ dependencies:
   - numpy
   - matplotlib
   - scipy
+  - pip
   - pip:
-    - pip
     - ase
     - py3Dmol
     - ipyfilechooser
