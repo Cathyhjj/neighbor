@@ -1,19 +1,20 @@
 name: neighbor
 channels:
   - defaults
-  - conda-forge 
+  - conda-forge
 dependencies:
   - python>=3.8
   - numpy
   - matplotlib
   - scipy
+  - pandas
+  - ase
+  - ipywidgets
+  - openpyxl
   - pip
   - pip:
-    - ase
-    - py3Dmol
-    - ipyfilechooser
-    - ipywidgets
-    - IPython
-    - ipympl
-    - openpyxl
-    - plotly
+      - py3Dmol
+      - ipyfilechooser
+      - plotly
+      - IPython
+      - ipympl
