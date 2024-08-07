@@ -1,6 +1,0 @@
-4
-Lattice="3.92316 0.0 0.0 0.0 3.92316 0.0 0.0 0.0 3.92316" Properties=species:S:1:pos:R:3:spacegroup_kinds:I:1 spacegroup="F m -3 m" unit_cell=conventional occupancy="_JSON {"0": {"Pt": 1.0}}" pbc="T T T"
-Pt       0.00000000       0.00000000       0.00000000        0
-Pt       0.00000000       1.96158000       1.96158000        0
-Pt       1.96158000       0.00000000       1.96158000        0
-Pt       1.96158000       1.96158000       0.00000000        0
