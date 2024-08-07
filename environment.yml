@@ -17,4 +17,4 @@ dependencies:
     - ipympl
     - openpyxl
     - itertools
-    
+    - plotly
