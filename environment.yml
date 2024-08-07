@@ -14,4 +14,3 @@ dependencies:
     - ipyfilechooser
     - ipywidgets
     - IPython
-    - os
