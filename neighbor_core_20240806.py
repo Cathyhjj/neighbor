@@ -8,6 +8,8 @@ import plotly.graph_objects as go
 import os
 from scipy.spatial.distance import pdist
 from ase.neighborlist import NeighborList, natural_cutoffs
+from ase.build import cut
+from ase.geometry import find_mic
 from scipy.optimize import curve_fit
 from collections import defaultdict
 from ase.geometry import cell_to_cellpar
@@ -16,7 +18,7 @@ from openpyxl import Workbook
 from itertools import combinations
 from itertools import product
 
-def fit_polynomial(x, y, degree):
+def fit_polynomial_old(x, y, degree):
     """
     Fit a polynomial of the given degree to the provided points.
     
@@ -50,6 +52,83 @@ def fit_polynomial(x, y, degree):
     plt.show()
     
     return polynomial
+
+def fit_polynomial(x, y, degree):
+    """
+    Fit a polynomial of the given degree to the provided points, print the coefficients table,
+    and display the polynomial equation on the plot.
+    
+    Parameters:
+    x (array-like): The x-coordinates of the data points.
+    y (array-like): The y-coordinates of the data points.
+    degree (int): The degree of the polynomial to fit.
+    
+    Returns:
+    pd.DataFrame: A DataFrame containing the coefficients of the polynomial.
+    """
+    # Fit the polynomial
+    coeffs = np.polyfit(x, y, degree)
+    polynomial = np.poly1d(coeffs)
+    
+    # Create a DataFrame to store coefficients
+    coeff_table = pd.DataFrame({
+        'Coefficient': [f'x^{deg}' if deg > 0 else 'Constant' for deg in range(degree + 1)],
+        'Value': coeffs[::-1]  # Reverse the coefficients to match the correct order
+    })
+    
+    # Print the coefficient table
+    print(coeff_table)
+    
+    # Create the polynomial equation as a formatted string
+    equation = "y = " + " + ".join([f"{coeff:.3f}x^{deg}" if deg > 0 else f"{coeff:.3f}" 
+                                    for deg, coeff in enumerate(coeffs[::-1])])
+    
+    # Plot the points and the fitted polynomial
+    plt.figure()
+    plt.scatter(x, y, color='red', label='Data Points')
+    x_fit = np.linspace(min(x), max(x), 100)
+    y_fit = polynomial(x_fit)
+    plt.plot(x_fit, y_fit, color='blue', label=f'Polynomial Fit (degree {degree})')
+    plt.xlabel('X')
+    plt.ylabel('Y')
+    plt.title('Polynomial Fit to Points')
+    
+    # Display the polynomial equation on the plot using standard text
+    plt.text(0.05, 0.95, equation, transform=plt.gca().transAxes, fontsize=10, verticalalignment='top')
+    plt.legend()
+    plt.show()
+    
+    return coeff_table
+
+def estimate_polynomial(coeff_table, x_value):
+    """
+    Estimate the y value given a coefficient table and an x value.
+    
+    Parameters:
+    coeff_table (pd.DataFrame): The table containing coefficients and their corresponding terms.
+    x_value (float): The x value for which to estimate the y value.
+    
+    Returns:
+    float: The estimated y value.
+    """
+    # Initialize the estimated y value
+    y_estimate = 0
+    
+    # Iterate through the coefficient table and calculate the y value
+    for i, row in coeff_table.iterrows():
+        coeff = row['Value']
+        term = row['Coefficient']
+        
+        # Extract the degree of the term
+        if term == 'Constant':
+            degree = 0
+        else:
+            degree = int(term.split('^')[1])
+        
+        # Calculate the contribution of this term to the y value
+        y_estimate += coeff * (x_value ** degree)
+    
+    return y_estimate
 
 def fit_logarithmic(x, y):
     """
@@ -201,6 +280,47 @@ class ClusterNeighbor:
             self.refresh_atoms()
         return expanded_cluster
 
+
+    def expand_to_sphere(self, target_diameter=50, self_apply=False):
+        """Expand the CIF structure to cover a desired diameter and cut a spherical cluster around the center of mass.
+
+        Args:
+            target_diameter (float): The desired size of the cluster in Ångströms.
+            self_apply (bool): Whether to apply the expansion and cut to the current cluster.
+
+        Returns:
+            expanded_cluster (Atoms): The expanded and cut cluster.
+        """
+        # Estimate the repetitions needed to ensure the desired diameter
+        cell_lengths = self.atoms.get_cell_lengths_and_angles()[:3]
+        reps = np.ceil(target_diameter / np.array(cell_lengths)).astype(int)
+
+        # Expand the unit cell using atoms.repeat to cover the desired diameter
+        expanded_atoms = self.atoms.repeat(reps)
+
+        # Recalculate the center of mass for the expanded structure
+        center_of_mass_expanded = expanded_atoms.get_center_of_mass()
+
+        # Calculate the distance of each atom from the center of mass
+        distances = np.linalg.norm(expanded_atoms.positions - center_of_mass_expanded, axis=1)
+
+        # Select atoms within the desired spherical diameter
+        radius = target_diameter / 2.0
+        mask = distances <= radius
+        expanded_cluster = expanded_atoms[mask]
+
+        # Sort the atoms by atomic number
+        sorted_indices = np.argsort(expanded_cluster.get_atomic_numbers())
+        expanded_cluster = expanded_cluster[sorted_indices]
+
+        # Apply the expansion and cut to the current cluster if self_apply is True
+        if self_apply:
+            self.atoms = expanded_cluster
+            self.refresh_atoms()
+
+        return expanded_cluster
+
+
     def view_xyz(self, style_all=None, highlight_atom1="O", highlight_atom2="Pb", label=False, show_symbol=False):
         """Visualize the atomic cluster using py3Dmol.
 
@@ -241,11 +361,11 @@ class ClusterNeighbor:
         """Estimate the cluster size using the maximum pairwise distance method.
 
         Returns:
-        float: Approximate cluster size.
+        float: Approximate cluster size in diameter.
         """
         positions = self.atoms.get_positions()
         distances = pdist(positions)
-        self.cluster_size = np.max(distances) / 2
+        self.cluster_size = np.max(distances)
         return self.cluster_size
     
     def get_cluster_size_bounding_box(self):
