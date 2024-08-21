@@ -1,0 +1,17 @@
+data_image0
+_chemical_formula_structural       
+_chemical_formula_sum              ""
+_cell_length_a       34.9322
+_cell_length_b       34.9322
+_cell_length_c       34.9322
+_cell_angle_alpha    1.20742e-06
+_cell_angle_beta     1.20742e-06
+_cell_angle_gamma    1.20742e-06
+
+_space_group_name_H-M_alt    "P 1"
+_space_group_IT_number       1
+
+loop_
+  _space_group_symop_operation_xyz
+  'x, y, z'
+

@@ -53,7 +53,7 @@ def fit_polynomial_old(x, y, degree):
     
     return polynomial
 
-def fit_polynomial(x, y, degree):
+def fit_polynomial(x, y, degree, new_figure=True):
     """
     Fit a polynomial of the given degree to the provided points, print the coefficients table,
     and display the polynomial equation on the plot.
@@ -80,23 +80,23 @@ def fit_polynomial(x, y, degree):
     print(coeff_table)
     
     # Create the polynomial equation as a formatted string
-    equation = "y = " + " + ".join([f"{coeff:.3f}x^{deg}" if deg > 0 else f"{coeff:.3f}" 
+    equation = "y = " + " + ".join([f"${coeff:.3f}x^{deg}$" if deg > 0 else f"{coeff:.3f}" 
                                     for deg, coeff in enumerate(coeffs[::-1])])
     
     # Plot the points and the fitted polynomial
-    plt.figure()
+    if new_figure:
+        plt.figure()
     plt.scatter(x, y, color='red', label='Data Points')
     x_fit = np.linspace(min(x), max(x), 100)
     y_fit = polynomial(x_fit)
-    plt.plot(x_fit, y_fit, color='blue', label=f'Polynomial Fit (degree {degree})')
+    plt.plot(x_fit, y_fit, label=f'Polynomial Fit (degree {degree})')
     plt.xlabel('X')
     plt.ylabel('Y')
     plt.title('Polynomial Fit to Points')
     
     # Display the polynomial equation on the plot using standard text
-    plt.text(0.05, 0.95, equation, transform=plt.gca().transAxes, fontsize=10, verticalalignment='top')
+    plt.text(0.05, 0.95, equation, transform=plt.gca().transAxes, fontsize=8, verticalalignment='top')
     plt.legend()
-    plt.show()
     
     return coeff_table
 
@@ -560,7 +560,7 @@ class ClusterNeighbor:
             CN_summary[cn] += 1
 
         average_CN = np.mean(list(atom_CN_counts.values()))
-        info = "\n".join([f"{count} atoms have CN of {cn}" for cn, count in sorted(CN_summary.items())])
+        info = "\n".join([f"{count} atoms have CN of {cn}; " for cn, count in sorted(CN_summary.items())])
 
         self.CN_summary[pairs_type][target_distance] = {
             'average_CN': average_CN,
