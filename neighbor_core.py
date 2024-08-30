@@ -1,6 +1,7 @@
 import py3Dmol
 import numpy as np
 import matplotlib.pyplot as plt
+import re
 from ipyfilechooser import FileChooser
 from ase.io import read
 from ase.io import write
@@ -18,42 +19,8 @@ from openpyxl import Workbook
 from itertools import combinations
 from itertools import product
 
-def fit_polynomial_old(x, y, degree):
-    """
-    Fit a polynomial of the given degree to the provided points.
-    
-    Parameters:
-    points (list of float): The points to fit the polynomial to.
-    degree (int): The degree of the polynomial to fit.
-    
-    Returns:
-    np.poly1d: The fitted polynomial.
-    """
-    # Fit the polynomial
-    coeffs = np.polyfit(x, y, degree)
-    polynomial = np.poly1d(coeffs)
-    
-    # Create the polynomial equation as a string
-    equation = "y = " + " + ".join([f"{coeff:.2f}x^{deg}" if deg > 0 else f"{coeff:.2f}" 
-                                    for deg, coeff in enumerate(coeffs[::-1])])
-    plt.figure()
-    # Plot the points and the fitted polynomial
-    plt.scatter(x, y, color='red', label='Data Points')
-    x_fit = np.linspace(min(x), max(x), 100)
-    y_fit = polynomial(x_fit)
-    plt.plot(x_fit, y_fit, color='blue', label=f'Polynomial Fit (degree {degree})')
-    # plt.legend()
-    plt.xlabel('Index')
-    plt.ylabel('Value')
-    plt.title('Polynomial Fit to Points')
-    # Display the polynomial equation on the plot
-    plt.text(0.05, 0.95, equation, transform=plt.gca().transAxes, fontsize=12, verticalalignment='top')
-    
-    plt.show()
-    
-    return polynomial
 
-def fit_polynomial(x, y, degree, new_figure=True):
+def fit_polynomial(x, y, degree, new_figure=True, xlabel='x', ylabel='y'):
     """
     Fit a polynomial of the given degree to the provided points, print the coefficients table,
     and display the polynomial equation on the plot.
@@ -76,12 +43,22 @@ def fit_polynomial(x, y, degree, new_figure=True):
         'Value': coeffs[::-1]  # Reverse the coefficients to match the correct order
     })
     
-    # Print the coefficient table
-    print(coeff_table)
-    
     # Create the polynomial equation as a formatted string
-    equation = "y = " + " + ".join([f"${coeff:.3f}x^{deg}$" if deg > 0 else f"{coeff:.3f}" 
-                                    for deg, coeff in enumerate(coeffs[::-1])])
+    equation = f"{ylabel}=" + "+".join([f"{coeff:.4f}*{xlabel}" if deg == 1 else f"${coeff:.4f}*{xlabel}^{deg}$" if deg > 1 else f"{coeff:.4f}" 
+                                          for deg, coeff in enumerate(coeffs[::-1])])
+
+    # Adjust the sign formatting and remove unnecessary spaces
+    print_out_equation = equation.replace('$', '')
+    print_out_equation = print_out_equation.replace('+-', '-')
+    # Create a formatted equation without special characters for plot display
+    formatted_equation = equation.replace('*', '')
+    formatted_equation = formatted_equation.replace('+$-', '$-')
+    
+    # Print the coefficient table and the equation
+    print(coeff_table)
+    print("-" * 20)
+    print(print_out_equation)
+    print("\n")
     
     # Plot the points and the fitted polynomial
     if new_figure:
@@ -90,14 +67,15 @@ def fit_polynomial(x, y, degree, new_figure=True):
     x_fit = np.linspace(min(x), max(x), 100)
     y_fit = polynomial(x_fit)
     plt.plot(x_fit, y_fit, label=f'Polynomial Fit (degree {degree})')
-    plt.xlabel('X')
-    plt.ylabel('Y')
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
     plt.title('Polynomial Fit to Points')
     
-    # Display the polynomial equation on the plot using standard text
-    plt.text(0.05, 0.95, equation, transform=plt.gca().transAxes, fontsize=8, verticalalignment='top')
+    # Display the polynomial equation on the plot
+    x_pos = min(x_fit) + 0.1 * (max(x_fit) - min(x_fit))
+    y_pos = max(y_fit) - 0.1 * (max(y_fit) - min(y_fit))
+    plt.text(x_pos, y_pos, formatted_equation, fontsize=8)
     plt.legend()
-    
     return coeff_table
 
 def estimate_polynomial(coeff_table, x_value):
@@ -799,6 +777,3 @@ class ClusterNeighbor:
                 
                 df = pd.DataFrame(data)
                 df.to_excel(writer, sheet_name=bond_type, index=False)
-                
-                
-                
