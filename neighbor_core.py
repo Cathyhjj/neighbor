@@ -44,7 +44,7 @@ def fit_polynomial(x, y, degree, new_figure=True, xlabel='x', ylabel='y'):
     })
     
     # Create the polynomial equation as a formatted string
-    equation = f"{ylabel}=" + "+".join([f"{coeff:.4f}*{xlabel}" if deg == 1 else f"${coeff:.4f}*{xlabel}^{deg}$" if deg > 1 else f"{coeff:.4f}" 
+    equation = f"{ylabel}=" + "+".join([f"{coeff:.15f}*{xlabel}" if deg == 1 else f"${coeff:.15f}*{xlabel}^{deg}$" if deg > 1 else f"{coeff:.15f}" 
                                           for deg, coeff in enumerate(coeffs[::-1])])
 
     # Adjust the sign formatting and remove unnecessary spaces
