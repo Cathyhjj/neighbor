@@ -19,6 +19,74 @@ from openpyxl import Workbook
 from itertools import combinations
 from itertools import product
 
+def fit_michaelis_menten(x, y, new_figure=True, xlabel='x', ylabel='y'):
+    """
+    Fit a Michaelis-Menten function to the provided points, print the coefficients table,
+    and display the Michaelis-Menten equation on the plot.
+    
+    Parameters:
+    x (array-like): The x-coordinates of the data points.
+    y (array-like): The y-coordinates of the data points.
+    
+    Returns:
+    pd.DataFrame: A DataFrame containing the coefficients (α, β, and constant) of the Michaelis-Menten function.
+    """
+    # Define Michaelis-Menten function: y = (α * x) / (1 + β * x) + constant
+    def michaelis_menten_function(x, alpha, beta, constant):
+        return (alpha * x) / (1 + beta * x) + constant
+    
+    # Fit the Michaelis-Menten function
+    params, _ = curve_fit(michaelis_menten_function, x, y, 
+                          bounds=([0, 0, -np.inf], [np.inf, np.inf, 0]))
+                          
+
+    alpha, beta, constant = params
+    
+    # Create a DataFrame to store coefficients
+    coeff_table = pd.DataFrame({
+        'Coefficient': ['α', 'β', 'C'],
+        'Value': [alpha, beta, constant]
+    })
+    
+    # Create the Michaelis-Menten equation as a formatted string
+    print_out_equation = f"{ylabel} = ({alpha:.5f} * {xlabel}) / (1 + {beta:.5f} * {xlabel}) + {constant:.5f}"
+    latex_equation = f"${ylabel} = \\frac{{{alpha:.5f} \cdot {xlabel}}}{{1 + {beta:.5f} \cdot {xlabel}}} + {constant:.5f}$"
+    
+    # Print the coefficient table and the equation
+    print(coeff_table)
+    print("-" * 20)
+    print(print_out_equation)
+    print("\n")
+    
+    # Plot the points and the fitted Michaelis-Menten curve
+    if new_figure:
+        plt.figure()
+    plt.scatter(x, y, label='Data Points')
+    
+    # Dashed line: Plot for the extended range from 0 to max(x) + 10
+    x_extended = np.linspace(0, max(x) + 100, 100)
+    y_extended = michaelis_menten_function(x_extended, alpha, beta, constant)
+    plt.plot(x_extended, y_extended, linestyle='--', label='Extended Fit (Dashed)')
+    
+    # Solid line: Plot for the original range of x
+    x_fit = np.linspace(min(x), max(x), 100)
+    y_fit = michaelis_menten_function(x_fit, alpha, beta, constant)
+    plt.plot(x_fit, y_fit, label='Michaelis-Menten Fit (Solid)', linestyle='-')
+    
+    # Set labels and title
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.title('Michaelis-Menten Fit to Points')
+    
+    # Display the Michaelis-Menten equation on the plot
+    x_pos = min(x_fit) + 0.7 * (max(x_fit) - min(x_fit))
+    y_pos = max(y_fit) - 0.25 * (max(y_fit) - min(y_fit))
+    plt.text(x_pos, y_pos, latex_equation, fontsize=10)
+    
+    plt.legend()
+    plt.grid(True)
+    return coeff_table
+
 
 def fit_polynomial(x, y, degree, new_figure=True, xlabel='x', ylabel='y'):
     """
