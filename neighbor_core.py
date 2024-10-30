@@ -1,221 +1,91 @@
 import py3Dmol
 import numpy as np
-import matplotlib.pyplot as plt
-import re
-from ipyfilechooser import FileChooser
+import plotly.graph_objects as go
 from ase.io import read
 from ase.io import write
-import plotly.graph_objects as go
 import os
 from scipy.spatial.distance import pdist
 from ase.neighborlist import NeighborList, natural_cutoffs
-from ase.build import cut
-from ase.geometry import find_mic
 from scipy.optimize import curve_fit
 from collections import defaultdict
 from ase.geometry import cell_to_cellpar
 import pandas as pd
-from openpyxl import Workbook
-from itertools import combinations
 from itertools import product
 
-def fit_michaelis_menten(x, y, new_figure=True, xlabel='x', ylabel='y'):
+
+def fit_michaelis_menten(x, y, max_value=None, xlabel='x', ylabel='y', label_prefix="", maxfev=50000, extended_range=100):
     """
-    Fit a Michaelis-Menten function to the provided points, print the coefficients table,
-    and display the Michaelis-Menten equation on the plot.
-    
-    Parameters:
-    x (array-like): The x-coordinates of the data points.
-    y (array-like): The y-coordinates of the data points.
-    
-    Returns:
-    pd.DataFrame: A DataFrame containing the coefficients (α, β, and constant) of the Michaelis-Menten function.
+    Fit a Michaelis-Menten function with a constant offset. If max_value is provided, 
+    the function is constrained to approach max_value as x -> +∞.
     """
-    # Define Michaelis-Menten function: y = (α * x) / (1 + β * x) + constant
+    # Define the Michaelis-Menten function with a constant offset
     def michaelis_menten_function(x, alpha, beta, constant):
         return (alpha * x) / (1 + beta * x) + constant
-    
-    # Fit the Michaelis-Menten function
-    params, _ = curve_fit(michaelis_menten_function, x, y, 
-                          bounds=([0, 0, -np.inf], [np.inf, np.inf, 0]))
-                          
 
-    alpha, beta, constant = params
-    
-    # Create a DataFrame to store coefficients
+    # Set initial guesses and bounds for parameters
+    initial_guess = [np.max(y) / 2, 1, 0]  # Starting guess for alpha, beta, and constant
+
+    if max_value is None:
+        bounds = ([0, 0, -np.inf], [np.inf, np.inf, np.inf])  # Unbounded constant if max_value is not given
+    else:
+        assert max_value > 0, "max_value must be greater than zero"
+        
+        # Define a constrained fit function that adjusts constant based on max_value
+        def constrained_function(x, alpha, beta):
+            constant = max_value - (alpha / beta)
+            return michaelis_menten_function(x, alpha, beta, constant)
+        
+        # Bounds only on alpha and beta; constant is calculated based on max_value
+        bounds = ([0, 0], [np.inf, np.inf])
+        initial_guess = [max_value / 2, 1]  # Adjusted initial guesses for alpha and beta
+
+    # Perform the fitting
+    if max_value is None:
+        params, _ = curve_fit(michaelis_menten_function, x, y, p0=initial_guess, bounds=bounds, maxfev=maxfev)
+        alpha, beta, constant = params
+    else:
+        params, _ = curve_fit(constrained_function, x, y, p0=initial_guess[:2], bounds=bounds, maxfev=maxfev)
+        alpha, beta = params
+        constant = max_value - (alpha / beta)
+
+    # Create a DataFrame for the coefficients
     coeff_table = pd.DataFrame({
         'Coefficient': ['α', 'β', 'C'],
         'Value': [alpha, beta, constant]
     })
-    
-    # Create the Michaelis-Menten equation as a formatted string
-    print_out_equation = f"{ylabel} = ({alpha:.5f} * {xlabel}) / (1 + {beta:.5f} * {xlabel}) + {constant:.5f}"
-    latex_equation = f"${ylabel} = \\frac{{{alpha:.5f} \cdot {xlabel}}}{{1 + {beta:.5f} \cdot {xlabel}}} + {constant:.5f}$"
-    
-    # Print the coefficient table and the equation
-    print(coeff_table)
-    print("-" * 20)
-    print(print_out_equation)
-    print("\n")
-    
-    # Plot the points and the fitted Michaelis-Menten curve
-    if new_figure:
-        plt.figure()
-    plt.scatter(x, y, label='Data Points')
-    
-    # Dashed line: Plot for the extended range from 0 to max(x) + 10
-    x_extended = np.linspace(0, max(x) + 100, 100)
+
+    # Generate extended and fitted data points
+    x_extended = np.linspace(0, max(x) + extended_range, 100)
     y_extended = michaelis_menten_function(x_extended, alpha, beta, constant)
-    plt.plot(x_extended, y_extended, linestyle='--', label='Extended Fit (Dashed)')
-    
-    # Solid line: Plot for the original range of x
     x_fit = np.linspace(min(x), max(x), 100)
     y_fit = michaelis_menten_function(x_fit, alpha, beta, constant)
-    plt.plot(x_fit, y_fit, label='Michaelis-Menten Fit (Solid)', linestyle='-')
-    
-    # Set labels and title
-    plt.xlabel(xlabel)
-    plt.ylabel(ylabel)
-    plt.title('Michaelis-Menten Fit to Points')
-    
-    # Display the Michaelis-Menten equation on the plot
-    x_pos = min(x_fit) + 0.7 * (max(x_fit) - min(x_fit))
-    y_pos = max(y_fit) - 0.25 * (max(y_fit) - min(y_fit))
-    plt.text(x_pos, y_pos, latex_equation, fontsize=10)
-    
-    plt.legend()
-    plt.grid(True)
-    return coeff_table
 
+    # Create Plotly traces
+    data_trace = go.Scatter(x=x, y=y, mode='markers', name=f'{label_prefix} Data Points')
+    extended_fit_trace = go.Scatter(x=x_extended, y=y_extended, mode='lines', line=dict(dash='dash'), name=f'{label_prefix} Extended Fit')
+    fit_trace = go.Scatter(x=x_fit, y=y_fit, mode='lines', name=f'{label_prefix} Michaelis-Menten Fit')
 
-def fit_polynomial(x, y, degree, new_figure=True, xlabel='x', ylabel='y'):
+    return coeff_table, data_trace, extended_fit_trace, fit_trace
+
+def fit_polynomial(x, y, degree, xlabel='x', ylabel='y', shell_label=""):
     """
-    Fit a polynomial of the given degree to the provided points, print the coefficients table,
-    and display the polynomial equation on the plot.
-    
-    Parameters:
-    x (array-like): The x-coordinates of the data points.
-    y (array-like): The y-coordinates of the data points.
-    degree (int): The degree of the polynomial to fit.
-    
-    Returns:
-    pd.DataFrame: A DataFrame containing the coefficients of the polynomial.
+    Fit a polynomial of the given degree to the provided points and return the plotly traces.
     """
-    # Fit the polynomial
     coeffs = np.polyfit(x, y, degree)
     polynomial = np.poly1d(coeffs)
-    
-    # Create a DataFrame to store coefficients
     coeff_table = pd.DataFrame({
         'Coefficient': [f'x^{deg}' if deg > 0 else 'Constant' for deg in range(degree + 1)],
-        'Value': coeffs[::-1]  # Reverse the coefficients to match the correct order
+        'Value': coeffs[::-1]
     })
-    
-    # Create the polynomial equation as a formatted string
-    equation = f"{ylabel}=" + "+".join([f"{coeff:.15f}*{xlabel}" if deg == 1 else f"${coeff:.15f}*{xlabel}^{deg}$" if deg > 1 else f"{coeff:.15f}" 
-                                          for deg, coeff in enumerate(coeffs[::-1])])
 
-    # Adjust the sign formatting and remove unnecessary spaces
-    print_out_equation = equation.replace('$', '')
-    print_out_equation = print_out_equation.replace('+-', '-')
-    # Create a formatted equation without special characters for plot display
-    formatted_equation = equation.replace('*', '')
-    formatted_equation = formatted_equation.replace('+$-', '$-')
-    
-    # Print the coefficient table and the equation
-    print(coeff_table)
-    print("-" * 20)
-    print(print_out_equation)
-    print("\n")
-    
-    # Plot the points and the fitted polynomial
-    if new_figure:
-        plt.figure()
-    plt.scatter(x, y, color='red', label='Data Points')
     x_fit = np.linspace(min(x), max(x), 100)
     y_fit = polynomial(x_fit)
-    plt.plot(x_fit, y_fit, label=f'Polynomial Fit (degree {degree})')
-    plt.xlabel(xlabel)
-    plt.ylabel(ylabel)
-    plt.title('Polynomial Fit to Points')
-    
-    # Display the polynomial equation on the plot
-    x_pos = min(x_fit) + 0.1 * (max(x_fit) - min(x_fit))
-    y_pos = max(y_fit) - 0.1 * (max(y_fit) - min(y_fit))
-    plt.text(x_pos, y_pos, formatted_equation, fontsize=8)
-    plt.legend()
-    return coeff_table
 
-def estimate_polynomial(coeff_table, x_value):
-    """
-    Estimate the y value given a coefficient table and an x value.
-    
-    Parameters:
-    coeff_table (pd.DataFrame): The table containing coefficients and their corresponding terms.
-    x_value (float): The x value for which to estimate the y value.
-    
-    Returns:
-    float: The estimated y value.
-    """
-    # Initialize the estimated y value
-    y_estimate = 0
-    
-    # Iterate through the coefficient table and calculate the y value
-    for i, row in coeff_table.iterrows():
-        coeff = row['Value']
-        term = row['Coefficient']
-        
-        # Extract the degree of the term
-        if term == 'Constant':
-            degree = 0
-        else:
-            degree = int(term.split('^')[1])
-        
-        # Calculate the contribution of this term to the y value
-        y_estimate += coeff * (x_value ** degree)
-    
-    return y_estimate
+    # Create traces instead of a complete figure
+    data_trace = go.Scatter(x=x, y=y, mode='markers', name=f'{shell_label} Data Points')
+    fit_trace = go.Scatter(x=x_fit, y=y_fit, mode='lines', name=f'{shell_label} Polynomial Fit (degree {degree})')
 
-def fit_logarithmic(x, y):
-    """
-    Fit a logarithmic function to the provided points.
-    
-    Parameters:
-    x (list of float): The x values of the points.
-    y (list of float): The y values of the points.
-    
-    Returns:
-    tuple: The parameters of the fitted logarithmic function.
-    """
-    # Define the logarithmic function
-    def log_func(x, a, b, c):
-        return a * np.log(b * x) + c
-
-    # Fit the logarithmic function to the data
-    popt, _ = curve_fit(log_func, x, y, maxfev=10000)
-
-    # Create the logarithmic equation as a string
-    a, b, c = popt
-    equation = f"y = {a:.2f} * log({b:.2f} * x) + {c:.2f}"
-
-    # Generate x values for plotting the fit
-    x_fit = np.linspace(min(x), max(x), 100)
-    # Generate y values using the fitted logarithmic function
-    y_fit_log = log_func(x_fit, *popt)
-
-    # Plot the data points and the logarithmic fit
-    plt.figure()
-    plt.scatter(x, y, color='red', label='Data Points')
-    plt.plot(x_fit, y_fit_log, color='blue', label='Logarithmic Fit')
-    plt.xlabel('x')
-    plt.ylabel('y')
-    plt.title('Logarithmic Fit to Points')
-    # Display the logarithmic equation on the plot
-    plt.text(0.05, 0.95, equation, transform=plt.gca().transAxes, fontsize=12, verticalalignment='top')
-    plt.show()
-
-    return popt
-
+    return coeff_table, data_trace, fit_trace
 
 class ClusterNeighbor:
     def __init__(self):
