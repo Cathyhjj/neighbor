@@ -1,2 +1,5 @@
 
 *.xlsx
+__pycache__/neighbor_core.cpython-310.pyc
+*.xlsx
+*.xlsx
