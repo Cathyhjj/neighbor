@@ -5,12 +5,16 @@ from ase.io import read
 from ase.io import write
 import os
 from scipy.spatial.distance import pdist
-from ase.neighborlist import NeighborList, natural_cutoffs
+from ase.neighborlist import natural_cutoffs
+from ase.data import atomic_numbers
 from scipy.optimize import curve_fit
 from collections import defaultdict
 from ase.geometry import cell_to_cellpar
 import pandas as pd
 from itertools import product
+from collections.abc import Mapping
+import operator
+from neighbor_search import BACKENDS, find_neighbor_edges
 
 
 def fit_michaelis_menten(x, y, max_value=None, xlabel='x', ylabel='y', label_prefix="", maxfev=50000, extended_range=100):
@@ -88,9 +92,17 @@ def fit_polynomial(x, y, degree, xlabel='x', ylabel='y', shell_label=""):
     return coeff_table, data_trace, fit_trace
 
 class ClusterNeighbor:
-    def __init__(self):
-        """Initialize the ClusterNeighbor class.
+    def __init__(self, neighbor_backend="auto", boundary_mode="auto"):
+        """Analyze radial coordination shells without changing their definition.
+
+        ``neighbor_backend`` is auto, pymatgen, scipy (finite only), or ase.
+        Auto prefers pymatgen, falling back to SciPy/ASE when not installed.
+        ``boundary_mode='auto'`` respects Atoms.pbc (including partial PBC);
+        cluster disables PBC, and periodic enables all three directions.
         """
+        self.neighbor_backend = neighbor_backend
+        self.boundary_mode = boundary_mode
+        self._validate_search_options()
         self.atoms = None
         self.folder = '.'
         self.xyz_string = ""
@@ -107,6 +119,12 @@ class ClusterNeighbor:
         self.CN_distances = defaultdict(list)
         self.CN = {}
         self.CN_summary = defaultdict(lambda: defaultdict(dict))  # Initialize CN_summary as a nested defaultdict
+        self.CN_shells = {}
+        self._pair_parameters = {}
+        self._neighbor_cache = None
+        self.neighbor_backend_used = None
+        self._atoms_signature = None
+        self.pairs_group = {}
         self.cluster_size = 0
         self.indices = None
 
@@ -115,6 +133,8 @@ class ClusterNeighbor:
         When self.atoms is updated, refresh the parameters.
         """
         self._init_parameters()
+        if self.atoms is None:
+            raise ValueError("Load an ASE Atoms object before calculating neighbors")
         self.xyz_string = f"{len(self.atoms)}\n\n" + "\n".join(
             f"{atom.symbol} {atom.position[0]} {atom.position[1]} {atom.position[2]}" for atom in self.atoms
         )
@@ -128,12 +148,40 @@ class ClusterNeighbor:
 
         # get the index of each element
         self.element_index_group = {element: [i for i, e in enumerate(self.elements) if e == element] for element in set(self.elements)}
-        self.center = self.atoms.get_center_of_mass()
-        
-        # Create the XYZ string for visualization
-        self.xyz_string = f"{len(self.atoms)}\n\n" 
-        for atom in self.atoms:
-            self.xyz_string += f"{atom.symbol} {atom.position[0]} {atom.position[1]} {atom.position[2]}\n"
+        self.center = self.atoms.get_center_of_mass() if len(self.atoms) else np.zeros(3)
+        self._symbols = np.asarray(self.elements)
+        self._atoms_signature = self._structure_signature()
+
+    def _validate_search_options(self):
+        if self.neighbor_backend not in BACKENDS:
+            raise ValueError("neighbor_backend must be auto, pymatgen, scipy or ase")
+        if self.boundary_mode not in {"auto", "cluster", "periodic"}:
+            raise ValueError("boundary_mode must be auto, cluster or periodic")
+
+    def _structure_signature(self):
+        return (self.atoms.positions.tobytes(), self.atoms.numbers.tobytes(),
+                self.atoms.cell.array.tobytes(), self.atoms.pbc.tobytes(),
+                self.atoms.get_masses().tobytes(), self.neighbor_backend,
+                self.boundary_mode)
+
+    def _sync_atoms(self):
+        """Invalidate derived results on the next calculation after direct edits."""
+        self._validate_search_options()
+        if self.atoms is None:
+            raise ValueError("Load an ASE Atoms object before calculating neighbors")
+        if self._atoms_signature != self._structure_signature():
+            self.refresh_atoms()
+
+    def _get_neighbor_edges(self, radius):
+        # Public callers synchronize once before requesting one or many pairs.
+        if self._neighbor_cache is None or self._neighbor_cache[0] < radius:
+            pbc = self.atoms.pbc
+            if self.boundary_mode != "auto":
+                pbc = np.full(3, self.boundary_mode == "periodic")
+            result = find_neighbor_edges(self.atoms, radius, pbc, self.neighbor_backend)
+            self._neighbor_cache = (radius, result)
+            self.neighbor_backend_used = result[-1]
+        return self._neighbor_cache[1][:4]
 
     def _calculate_distance(self, coord1, coord2):
         """Calculate the Euclidean distance between two sets of coordinates.
@@ -207,8 +255,12 @@ class ClusterNeighbor:
         Returns:
             expanded_cluster (Atoms): The expanded and cut cluster.
         """
+        self._sync_atoms()
+        _, target_diameter = self._validate_cn_parameters(0., target_diameter)
         # Estimate the repetitions needed to ensure the desired diameter
-        cell_lengths = self.atoms.get_cell_lengths_and_angles()[:3]
+        cell_lengths = self.atoms.cell.lengths()
+        if np.any(cell_lengths <= 0):
+            raise ValueError("Expanding a crystal requires three nonzero cell vectors")
         reps = np.ceil(target_diameter / np.array(cell_lengths)).astype(int)
 
         # Expand the unit cell using atoms.repeat to cover the desired diameter
@@ -224,6 +276,7 @@ class ClusterNeighbor:
         radius = target_diameter / 2.0
         mask = distances <= radius
         expanded_cluster = expanded_atoms[mask]
+        expanded_cluster.set_pbc(False)
 
         # Sort the atoms by atomic number
         sorted_indices = np.argsort(expanded_cluster.get_atomic_numbers())
@@ -279,6 +332,10 @@ class ClusterNeighbor:
         Returns:
         float: Approximate cluster size in diameter.
         """
+        self._sync_atoms()
+        if len(self.atoms) < 2:
+            self.cluster_size = 0.
+            return self.cluster_size
         positions = self.atoms.get_positions()
         distances = pdist(positions)
         self.cluster_size = np.max(distances)
@@ -306,220 +363,218 @@ class ClusterNeighbor:
         Returns:
             atoms: The shrunken cluster.
         """
+        self._sync_atoms()
         if new_radius is None:
             new_radius = self.cluster_size - 0.1
         center = self.atoms[center_atom_index].position if center_atom_index is not None else self.center
         distances = np.linalg.norm(self.atoms.positions - center, axis=1)
         mask = distances <= new_radius
         atoms_smaller = self.atoms[mask]
+        atoms_smaller.set_pbc(False)
         if self_apply:
             self.atoms = atoms_smaller
             self.refresh_atoms()
         return atoms_smaller
 
-    def get_CN(self, center_atom=None, CN_atom=None, tolerance=0.01, bond_range=5, printit=True):
-        """
-        Calculate the coordination number (CN) for a specified bond type in the atomic cluster.
- 
-        Args:
-        center_atom (str): Symbol of the central atom type for which CN is calculated. Defaults to the first atom's symbol.
-        CN_atom (str): Symbol of the neighboring atom type for which CN is calculated. Defaults to the second atom's symbol.
-        bond_ranges (float): Threshold for identifying significant gaps in bond lengths. Defaults to 0.01.
-        tolerance (float): Maximum distance to consider for coordination number calculations. Defaults to 5.
-        printit (bool): Whether to print the results. Defaults to True.
+    @staticmethod
+    def _validate_cn_parameters(tolerance, bond_range):
+        tolerance, bond_range = float(tolerance), float(bond_range)
+        if not np.isfinite(tolerance) or tolerance < 0:
+            raise ValueError("tolerance must be finite and nonnegative")
+        if not np.isfinite(bond_range) or bond_range <= 0:
+            raise ValueError("bond_range must be finite and positive")
+        return tolerance, bond_range
 
-        Returns:
-        dict: A dictionary where the keys are bond lengths and the values are the calculated coordination numbers.
-
-        Example:
-        """
+    def _resolve_pair(self, center_atom, CN_atom):
         if center_atom is None:
-            center_atom = list(self.pairs_types)[0].split('-')[0]
+            if not self.elements:
+                raise ValueError("Specify elements when querying an empty cluster")
+            center_atom = self.elements[0]
         if CN_atom is None:
-            CN_atom = list(self.pairs_types)[0].split('-')[1]
-            
-        self.tolerance = tolerance
-        self.bond_range = bond_range
-        
-        pairs_type = f"{center_atom}-{CN_atom}"
-        center_atom_index = self.element_index_group[center_atom]
-        CN_atom_index = self.element_index_group[CN_atom]
+            CN_atom = self.elements[min(1, len(self.elements) - 1)] if self.elements else center_atom
+        for symbol in (center_atom, CN_atom):
+            if symbol not in atomic_numbers:
+                raise ValueError(f"Unknown element symbol: {symbol!r}")
+        return center_atom, CN_atom, f"{center_atom}-{CN_atom}"
 
-        # Create a NeighborList with the specified cutoff radius
-        cutoffs = [bond_range] * len(self.atoms)
-        nl = NeighborList(cutoffs, skin=0.5, bothways=True, self_interaction=False)
-        nl.update(self.atoms)
-        
-        # Calculate all distances once and filter based on CN_atom_index
-        distances_all = []
-        for atom_i in center_atom_index:
-            indices, offsets = nl.get_neighbors(atom_i)
-            indices = indices[indices != atom_i]  # Exclude self-pairing
-            if len(indices) == 0:
-                continue
-            distances = self.atoms.get_distances(atom_i, indices, mic=True)
-            mask = np.isin(indices, CN_atom_index)
-            distances_all.extend(distances[mask])
+    @staticmethod
+    def _resolve_shell_edges(shell_edges, center_atom, CN_atom, bond_range):
+        if isinstance(shell_edges, Mapping):
+            # A single A-B definition also covers B-A unless explicitly overridden.
+            keys = (f"{center_atom}-{CN_atom}", (center_atom, CN_atom),
+                    f"{CN_atom}-{center_atom}", (CN_atom, center_atom))
+            shell_edges = next((shell_edges[k] for k in keys if k in shell_edges), None)
+        if shell_edges is None:
+            return None
+        edges = np.asarray(shell_edges, dtype=float)
+        if (edges.ndim != 1 or len(edges) < 2 or not np.isfinite(edges).all()
+                or edges[0] < 0 or np.any(np.diff(edges) <= 0)):
+            raise ValueError("shell_edges must be a finite, nonnegative, strictly increasing sequence")
+        if edges[-1] > bond_range:
+            raise ValueError("The final shell edge must not exceed bond_range")
+        return tuple(float(value) for value in edges)
 
-        # Convert the distances to a numpy array
-        distances_all = np.array(distances_all)
-        if len(distances_all) == 0:
-            print(f"No valid distances found for bond type {pairs_type}.")
-            return self.CN
-    
-        # Sort the distances and remove zeros and distances beyond the bond range
-        distance_sorted = np.sort(distances_all)
-        distance_sorted = distance_sorted[(distance_sorted != 0) & (distance_sorted < bond_range)]
-        
-        # Calculate differences and identify significant gaps
-        if len(distance_sorted) == 0:
-            print(f"No valid sorted distances found for bond type {pairs_type}.")
-            return self.CN
+    def _pair_edges(self, center_atom, CN_atom, bond_range):
+        i, j, _, distances = self._get_neighbor_edges(bond_range)
+        mask = ((self._symbols[i] == center_atom) & (self._symbols[j] == CN_atom)
+                & (distances < bond_range))
+        return i[mask], distances[mask]
 
-        # Calculate differences and identify significant gaps
-        diff = np.diff(distance_sorted)
-        indices = np.where(diff > tolerance)[0] + 1
-        self.CN_distances[pairs_type] = np.split(distance_sorted, indices)
-        self.CN[pairs_type] = {np.average(group): group.shape[0] / self.elements_num[center_atom] for group in self.CN_distances[pairs_type]}
-        
-        if printit:
-            print("=" * 20)
-            print(pairs_type)
-            print("=" * 20)
-            for i, lengths_key in enumerate(self.CN[pairs_type].keys()):
-                print(f"{i + 1} length: {lengths_key:.3f}  CN: {self.CN[pairs_type][lengths_key]:.3f}")
-
-        return self.CN
-    
-    def get_CN_all(self, tolerance=0.01, bond_range=5, printit=True):
-        """Calculate the coordination numbers for all pairs of atoms in the cluster.
-        
-        Args:
-        tolerance (float): Threshold for identifying significant gaps in bond lengths. Defaults to 0.01.
-        bond_range (float): Maximum distance to consider for coordination number calculations. Defaults to 5.
-        printit (bool): Whether to print the results. Defaults to True.
-        
-        Returns:
-        dict: A dictionary where the keys are bond types and the values are dictionaries containing the bond lengths and coordination numbers.
-        """
-        self.CN_distances = defaultdict(list)
-        self.CN = {}
-        for center_atom_i in self.elements_num.keys():
-            for CN_atom_i in self.elements_num.keys():
-                self.get_CN(center_atom=center_atom_i, 
-                            CN_atom=CN_atom_i, 
-                            tolerance=tolerance, 
-                            bond_range=bond_range, 
-                            printit=printit)
-    
-    def get_CN_around_distance(self, 
-                               center_atom=None, 
-                               CN_atom=None, 
-                               target_distance=None, 
-                               shell=None,
-                               tolerance=0.01, 
-                               bond_range=5, 
-                               printit=True
-                               ):
-        """
-        Calculate the coordination number (CN) for atoms with bond distances around the specified value.
-
-        Args:
-        target_distance (float): The target bond distance around which to count CNs. Defaults to None.
-        pairs_type (str): The bond type for which CN is calculated (e.g., "Cu-Cu"). Defaults to None.
-        tolerance (float): The tolerance for considering distances around the target distance. Defaults to 0.01.
-        bond_range (float): Maximum distance to consider for coordination number calculations. Defaults to 5.
-        printit (bool): Whether to print the results. Defaults to True.
-
-        Returns:
-        dict: A dictionary where the keys are coordination numbers and the values are the counts of atoms with that CN.
-        """
-        # If pairs_type is not provided, use the first pair type in the cluster
-        if center_atom is None:
-            center_atom = list(self.pairs_types)[0].split('-')[0]
-        if CN_atom is None:
-            CN_atom = list(self.pairs_types)[0].split('-')[1]
-            
-        pairs_type = f"{center_atom}-{CN_atom}"
-
-        # If target_distance is not provided, use the CN data to get the target distance
-        if target_distance is None:
-            if self.CN.get(pairs_type) is None:
-                self.get_CN(center_atom=center_atom, CN_atom=CN_atom, tolerance=tolerance, bond_range=bond_range, printit=printit)
-            if shell is None:
-                shell = 1
-            target_distance = list(self.CN[pairs_type].keys())[shell-1]
-        
-        # Get the indices of the center and CN atoms
-        center_atom_index = self.element_index_group[center_atom]
-        CN_atom_index = self.element_index_group[CN_atom]
-
-        # Create a NeighborList with the specified cutoff radius
-        cutoffs = [bond_range] * len(self.atoms)
-        nl = NeighborList(cutoffs, skin=tolerance, bothways=True, self_interaction=False)
-        nl.update(self.atoms)
-        
-        # Count CNs for each atom based on distances around the target distance
-        atom_CN_counts = {atom_i: 0 for atom_i in center_atom_index}
-        for atom_i in center_atom_index:
-            indices, offsets = nl.get_neighbors(atom_i)
-            indices = indices[indices != atom_i]  # Exclude self-pairing
-            if len(indices) == 0:
-                continue
-            distances = self.atoms.get_distances(atom_i, indices, mic=True)
-            mask = (distances >= target_distance - tolerance) & (distances <= target_distance + tolerance) & np.isin(indices, CN_atom_index)
-            atom_CN_counts[atom_i] = np.sum(mask)
-        
-        # Prepare the summary list
-        CN_summary = defaultdict(int)
-        for cn in atom_CN_counts.values():
-            CN_summary[cn] += 1
-
-        average_CN = np.mean(list(atom_CN_counts.values()))
-        info = "\n".join([f"{count} atoms have CN of {cn}; " for cn, count in sorted(CN_summary.items())])
-
-        self.CN_summary[pairs_type][target_distance] = {
-            'average_CN': average_CN,
-            'info': info,
-            'tolerance': tolerance
+    def _shell_record(self, center_atom, centers, distances, shell_id, lower, upper, method):
+        atom_indices = np.asarray(self.element_index_group.get(center_atom, []), dtype=int)
+        counts = np.bincount(centers, minlength=len(self.atoms))[atom_indices]
+        values, frequencies = np.unique(counts, return_counts=True)
+        distribution = dict(zip(map(int, values), map(int, frequencies)))
+        return {
+            'shell_id': shell_id,
+            'distance': float(np.mean(distances)) if len(distances) else None,
+            'lower_bound': lower, 'upper_bound': upper, 'method': method,
+            'distance_min': float(np.min(distances)) if len(distances) else None,
+            'distance_max': float(np.max(distances)) if len(distances) else None,
+            'distance_std': float(np.std(distances)) if len(distances) else None,
+            # An absent center species has no defined mean, rather than a zero CN.
+            'average_CN': float(np.mean(counts)) if len(counts) else None,
+            'atom_indices': atom_indices, 'atom_CN': counts,
+            'distribution': distribution, 'distances': distances,
         }
 
+    def _ensure_pair_shells(self, center_atom, CN_atom, tolerance, bond_range, shell_edges):
+        pair = f"{center_atom}-{CN_atom}"
+        edges = self._resolve_shell_edges(shell_edges, center_atom, CN_atom, bond_range)
+        parameters = (tolerance, bond_range, edges)
+        if self._pair_parameters.get(pair) == parameters:
+            return self.CN_shells[pair]
+        centers, distances = self._pair_edges(center_atom, CN_atom, bond_range)
+        order = np.argsort(distances)
+        centers, distances = centers[order], distances[order]
+        records = []
+        if edges is None:
+            if len(distances):
+                bounds = np.r_[0, np.flatnonzero(np.diff(distances) > tolerance) + 1, len(distances)]
+                for shell_id, (lo, hi) in enumerate(zip(bounds[:-1], bounds[1:]), 1):
+                    records.append(self._shell_record(
+                        center_atom, centers[lo:hi], distances[lo:hi], shell_id,
+                        float(distances[lo]), float(distances[hi - 1]), 'gap'))
+        else:
+            for shell_id, (lo, hi) in enumerate(zip(edges[:-1], edges[1:]), 1):
+                start, stop = np.searchsorted(distances, [lo, hi], side='left')
+                records.append(self._shell_record(
+                    center_atom, centers[start:stop], distances[start:stop], shell_id, lo, hi, 'edges'))
+        self.CN_shells[pair] = records
+        self.CN_distances[pair] = [record['distances'] for record in records]
+        self.CN[pair] = {record['distance']: record['average_CN']
+                         for record in records if record['distance'] is not None}
+        self.CN_summary[pair] = {}
+        self._pair_parameters[pair] = parameters
+        return records
+
+    @staticmethod
+    def _summary_record(record, tolerance):
+        result = {key: value for key, value in record.items() if key != 'distances'}
+        result['tolerance'] = tolerance
+        result['info'] = "\n".join(
+            f"{count} atoms have CN of {cn}; " for cn, count in record['distribution'].items())
+        return result
+
+    def get_CN(self, center_atom=None, CN_atom=None, tolerance=0.01, bond_range=5,
+               printit=True, *, shell_edges=None):
+        """Calculate mean radial-shell CN for one directed element pair.
+
+        All central atoms, including those with zero neighbors, enter the mean.
+        Distances are strictly less than ``bond_range`` (Angstrom).
+        By default, sorted distances are split where adjacent gaps exceed
+        ``tolerance``. For distorted structures or size series, ``shell_edges``
+        sets fixed [lower, upper) intervals. It may be a sequence or a mapping
+        from element pair to sequence; a reverse-pair definition is reused.
+        Unspecified pairs use gap grouping. Empty explicit shells are retained
+        in ``CN_shells``; the legacy distance-keyed ``CN`` contains occupied ones.
+        """
+        self._sync_atoms()
+        tolerance, bond_range = self._validate_cn_parameters(tolerance, bond_range)
+        center_atom, CN_atom, pair = self._resolve_pair(center_atom, CN_atom)
+        self.tolerance, self.bond_range = tolerance, bond_range
+        self._ensure_pair_shells(center_atom, CN_atom, tolerance, bond_range, shell_edges)
         if printit:
-            print("=" * 20)
-            print(f"Coordination numbers around {target_distance:.3f} Å for {pairs_type}")
-            print("=" * 20)
-            for cn, count in sorted(CN_summary.items()):
+            print("=" * 20, pair, "=" * 20, sep="\n")
+            for record in self.CN_shells[pair]:
+                if record['distance'] is not None:
+                    print(f"{record['shell_id']} length: {record['distance']:.3f}  CN: {record['average_CN']:.3f}")
+        return self.CN
+
+    def get_CN_all(self, tolerance=0.01, bond_range=5, printit=True, *, shell_edges=None):
+        """Calculate every directed element pair using one shared neighbor table."""
+        self._sync_atoms()
+        tolerance, bond_range = self._validate_cn_parameters(tolerance, bond_range)
+        self.CN_distances = defaultdict(list)
+        self.CN = {}
+        self.CN_shells = {}
+        self.CN_summary = defaultdict(lambda: defaultdict(dict))
+        self._pair_parameters = {}
+        for center_atom in self.elements_num:
+            for CN_atom in self.elements_num:
+                self.get_CN(center_atom, CN_atom, tolerance, bond_range, printit,
+                            shell_edges=shell_edges)
+        return self.CN
+
+    def get_CN_around_distance(self, center_atom=None, CN_atom=None,
+                               target_distance=None, shell=None, tolerance=0.01,
+                               bond_range=5, printit=True, *, shell_edges=None):
+        """Return a histogram mapping per-atom CN to number of central atoms.
+
+        ``shell`` is 1-based and counts the exact members used by ``get_CN``;
+        the default is shell 1. Supplying ``target_distance`` instead explicitly
+        requests the inclusive window target +/- tolerance, restricted to
+        distances < bond_range. The two modes are intentionally distinct.
+        """
+        self._sync_atoms()
+        tolerance, bond_range = self._validate_cn_parameters(tolerance, bond_range)
+        center_atom, CN_atom, pair = self._resolve_pair(center_atom, CN_atom)
+        if target_distance is not None and shell is not None:
+            raise ValueError("Specify either shell or target_distance, not both")
+        records = self._ensure_pair_shells(center_atom, CN_atom, tolerance, bond_range, shell_edges)
+        if target_distance is None:
+            shell = 1 if shell is None else operator.index(shell)
+            if shell < 1 or (records and shell > len(records)) or (not records and shell != 1):
+                raise ValueError(f"Shell {shell} is unavailable for {pair}")
+            if not records:
+                count = len(self.element_index_group.get(center_atom, []))
+                return {0: count} if count else {}
+            record = records[shell - 1]
+            key = record['distance']
+        else:
+            target_distance = float(target_distance)
+            if not np.isfinite(target_distance) or target_distance < 0:
+                raise ValueError("target_distance must be finite and nonnegative")
+            centers, distances = self._pair_edges(center_atom, CN_atom, bond_range)
+            lower, upper = max(0., target_distance - tolerance), target_distance + tolerance
+            mask = (distances >= lower) & (distances <= upper)
+            record = self._shell_record(center_atom, centers[mask], distances[mask],
+                                        None, lower, min(upper, bond_range), 'window')
+            key = target_distance
+        if key is not None:
+            self.CN_summary[pair][key] = self._summary_record(record, tolerance)
+        if printit:
+            label = f"shell {record['shell_id']}" if target_distance is None else f"window around {target_distance:.3f} Å"
+            print(f"Coordination numbers for {pair}, {label}")
+            for cn, count in record['distribution'].items():
                 print(f"{count} atoms have CN of {cn}")
-                
-        return CN_summary
+        return dict(record['distribution'])
 
-    def get_CN_summary_all(self,
-                        tolerance=0.01,
-                        bond_range=5,
-                        printit=True):
-        """
-        Calculate the coordination numbers for all pairs of atoms in the cluster.
+    def get_CN_summary_all(self, tolerance=0.01, bond_range=5, printit=True, *, shell_edges=None):
+        """Summarize the same shell memberships used for mean CN calculation.
 
-        Args:
-        tolerance (float): Threshold for identifying significant gaps in bond lengths. Defaults to 0.01.
-        bond_range (float): Maximum distance to consider for coordination number calculations. Defaults to 5.
-        printit (bool): Whether to print the results. Defaults to True.
-        
-        Returns:
-        dict: A dictionary where the keys are bond types and the values are dictionaries containing the bond lengths and coordination numbers.
+        Legacy distance-keyed summaries omit empty explicit shells. Full records,
+        including empty intervals and stable shell IDs, are in ``CN_shells``.
         """
-        self.get_CN_all(tolerance=tolerance, bond_range=bond_range, printit=printit)
-        for pair_type in self.pairs_types:
-            center_atom, CN_atom = pair_type.split('-')
-            for target_distance in self.CN[pair_type].keys():
-                self.get_CN_around_distance(center_atom=center_atom,
-                                            CN_atom=CN_atom,
-                                            target_distance=target_distance,
-                                            tolerance=tolerance,
-                                            bond_range=bond_range,
-                                            printit=printit)
+        self.get_CN_all(tolerance, bond_range, printit=False, shell_edges=shell_edges)
+        for pair, records in self.CN_shells.items():
+            for record in records:
+                if record['distance'] is not None:
+                    self.CN_summary[pair][record['distance']] = self._summary_record(record, float(tolerance))
+        if printit:
+            self.print_CN_summary()
         return self.CN_summary
-            
+
     def get_pairs(self):
         """Get all pairs of atoms in the cluster and their distances.
 
@@ -593,93 +648,74 @@ class ClusterNeighbor:
             self.refresh_atoms()
         return reduced_atoms
         
-    def remove_under_coordinated_atoms(self,
-                                       center_atom=None,
-                                       CN_atom=None, 
-                                       CN_threshold=2, 
-                                       bond_range=None, 
-                                       self_apply=False):
-        """ Remove under-coordinated atoms based on a specified coordination number threshold.
+    def _coordination_counts(self, center_atom, CN_atom, cutoff):
+        """Counts for all atom indices, using a scalar or summed natural radii."""
+        if cutoff is None:
+            radii = np.asarray(natural_cutoffs(self.atoms), dtype=float)
+            centers = self.element_index_group.get(center_atom, [])
+            neighbors = self.element_index_group.get(CN_atom, [])
+            if not centers or not neighbors:
+                return np.zeros(len(self.atoms), dtype=int)
+            radius = float(radii[centers].max() + radii[neighbors].max())
+            if radius <= 0:
+                return np.zeros(len(self.atoms), dtype=int)
+        else:
+            _, radius = self._validate_cn_parameters(0., cutoff)
+        i, j, _, distances = self._get_neighbor_edges(radius)
+        limits = radii[i] + radii[j] if cutoff is None else radius
+        mask = ((self._symbols[i] == center_atom) & (self._symbols[j] == CN_atom)
+                & (distances <= limits))
+        return np.bincount(i[mask], minlength=len(self.atoms))
 
-        Args:
-            bond_type: The bond type for which the CN is evaluated (e.g., "Pb-O").
-            CN_threshold: The threshold coordination number for identifying under-coordinated atoms.
-            bond_range: The cutoff distance for considering neighbors.
-            self_apply: Whether to apply the removal to the current cluster.
+    def remove_under_coordinated_atoms(self, center_atom=None, CN_atom=None,
+                                       CN_threshold=2, bond_range=None,
+                                       self_apply=False, *, include_isolated=True):
+        """Remove atoms with CN below the threshold in one batch.
 
-        Returns:
-            atoms: The cluster with under-coordinated atoms removed.
+        Includes CN=0 by default; use ``include_isolated=False`` to preserve
+        isolated atoms. This is a single pass on the original structure, not
+        iterative pruning. ``bond_range=None`` uses summed covalent radii.
         """
-        if not hasattr(self, 'CN'):
-            raise ValueError("CN data not available. Please run get_CN_all() first.")
-        if center_atom is None:
-            center_atom = list(self.pairs_types)[0].split('-')[0]
-            print(f"Center atom not provided. Using {center_atom} as the center atom.")
-        if CN_atom is None:
-            CN_atom = list(self.pairs_types)[0].split('-')[1]
-            print(f"CN atom not provided. Using {CN_atom} as the CN atom.")
-            
-        bond_type = f"{center_atom}-{CN_atom}"
-        # Identify the indices of the atoms we are targeting for removal (atom1, e.g., "O" in "O-Pb")
-        center_atom_indices = self.element_index_group[center_atom]
-        
-        # Collect indices of under-coordinated atoms
-        under_coordinated_indices = []
-        
-        # Get the CN for each atom and remove under-coordinated atoms
-        for atom_i in center_atom_indices:
-            CN = self.get_CN_for_atom_index(atom_i, bond_type, cutoff=bond_range)     
-            if CN > 0 and CN < CN_threshold:
-                under_coordinated_indices.append(atom_i)
-        
-        if under_coordinated_indices:
-            print(f"Remove under-coordinated atoms: {self.atoms[under_coordinated_indices]}[{under_coordinated_indices}]")
+        self._sync_atoms()
+        center_atom, CN_atom, _ = self._resolve_pair(center_atom, CN_atom)
+        threshold = float(CN_threshold)
+        if not np.isfinite(threshold) or threshold < 0:
+            raise ValueError("CN_threshold must be finite and nonnegative")
+        counts = self._coordination_counts(center_atom, CN_atom, bond_range)
+        centers = np.asarray(self.element_index_group.get(center_atom, []), dtype=int)
+        selected = counts[centers] < threshold
+        if not include_isolated:
+            selected &= counts[centers] > 0
+        indices = centers[selected].tolist()
+        if indices:
+            print(f"Remove under-coordinated atoms: {self.atoms[indices]}[{indices}]")
         else:
             print("No under-coordinated atoms found.")
-            
-        reduced_atoms = self.remove_atoms(under_coordinated_indices, self_apply=self_apply)
-        
-        return reduced_atoms
-    
-    def get_CN_for_atom_index(self, 
-                        atom_index, 
-                        bond_type, 
-                        tolerance=0.01,
-                        cutoff=None):
+        return self.remove_atoms(indices, self_apply=self_apply)
+
+    def get_CN_for_atom_index(self, atom_index, bond_type, tolerance=0.01, cutoff=None):
+        """Return integer CN for an atom and directed element pair.
+
+        A supplied ``cutoff`` is an inclusive pair distance. Otherwise use the
+        sum of the two atoms' covalent radii. ``tolerance`` is retained for API
+        compatibility and does not broaden that scientific distance threshold.
+        Atom indices must be nonnegative integers and match the central element.
         """
-        Extract the nearest neighbor coordination number (CN) for a specific atom index and bond type.
+        self._sync_atoms()
+        if isinstance(atom_index, (bool, np.bool_)):
+            raise ValueError("atom_index must be a nonnegative integer")
+        atom_index = operator.index(atom_index)
+        if atom_index < 0 or atom_index >= len(self.atoms):
+            raise IndexError("atom_index is outside the cluster")
+        self._validate_cn_parameters(tolerance, 1.)
+        if not isinstance(bond_type, str) or len(bond_type.split('-')) != 2:
+            raise ValueError("bond_type must be a directed pair such as 'Cu-O'")
+        center_atom, CN_atom, _ = self._resolve_pair(*bond_type.split('-'))
+        if self.elements[atom_index] != center_atom:
+            raise ValueError("The atom's element does not match the central element in bond_type")
+        counts = self._coordination_counts(center_atom, CN_atom, cutoff)
+        return int(counts[atom_index])
 
-        Args:
-        atom_index (int): The index of the atom for which the CN is calculated.
-        bond_type (str): The bond type for which the CN is evaluated (e.g., "Pb-O").
-        cutoff (float): The cutoff distance for considering neighbors. 
-
-        Returns:
-        int: The nearest neighbor coordination number for the specified atom and bond type.
-        """
-        # Extract atom types from the bond type
-        atom1, atom2 = bond_type.split('-')
-
-        # Set cutoffs if not provided
-        cutoffs = natural_cutoffs(self.atoms) if cutoff is None else [cutoff] * len(self.atoms)
-        if cutoff is None:
-            cutoff = cutoffs[atom_index] 
-        # Create a NeighborList with the specified cutoffs
-        nl = NeighborList(cutoffs, skin=tolerance, bothways=True, self_interaction=False)
-        nl.update(self.atoms)
-        
-        # Get neighbors and distances for the specified atom index
-        indices, offsets = nl.get_neighbors(atom_index)
-        distances = self.atoms.get_distances(atom_index, indices, mic=True)
-        
-        # Filter neighbors by bond type and find the nearest neighbors within the cutoff
-        neighbor_symbols = np.array(self.atoms[indices].get_chemical_symbols())
-        mask = (neighbor_symbols == atom2) & (distances <= cutoff)
-        
-        # Count the number of nearest neighbors matching the bond type
-        cn = np.sum(mask)
-        return int(cn)
-    
     def print_CN_summary(self):
         for pairs_type, distances in self.CN_summary.items():
             print("=" * 35)
@@ -697,21 +733,47 @@ class ClusterNeighbor:
         Args:
         filename (str): The name of the Excel file to write the data to. Defaults to "output.xlsx".
         """
+        self._sync_atoms()
+        filename = os.fspath(filename)
         if not filename.endswith(".xlsx"):
             filename += ".xlsx"
         filepath = os.path.join(self.folder, filename)
 
         with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
-            for bond_type, distances in self.CN_summary.items():
+            pairs = sorted(set(self.CN_shells) | set(self.CN_summary))
+            for bond_type in pairs:
+                distances = self.CN_summary.get(bond_type, {})
+                records = self.CN_shells.get(bond_type, [])
+                tolerance = self._pair_parameters.get(bond_type, (None,))[0]
+                # Retain explicit window queries, and include empty fixed shells
+                # so exported size series keep their original shell IDs.
+                rows = list(distances.items())
+                if not rows:
+                    rows = [(record['distance'], self._summary_record(record, tolerance))
+                            for record in records]
+                else:
+                    rows.extend((None, self._summary_record(record, tolerance))
+                                for record in records if record['distance'] is None)
+                rows.sort(key=lambda row: (row[1].get('shell_id') is None,
+                                          row[1].get('shell_id') or 0,
+                                          row[0] if row[0] is not None else -1))
                 data = []
-                for distance, details in distances.items():
+                for distance, details in rows:
                     N_atoms = details['info']
                     data.append({
-                        "Bond length [A]": f"{distance:.3f}",
+                        "Bond length [A]": f"{distance:.3f}" if distance is not None else None,
                         "range (tolerance) [A]": details['tolerance'],
                         "Average CN": details['average_CN'],
-                        "N. atoms": N_atoms
+                        "N. atoms": N_atoms,
+                        "Shell": details.get('shell_id'),
+                        "Shell method": details.get('method'),
+                        "Lower bound [A]": details.get('lower_bound'),
+                        "Upper bound [A]": details.get('upper_bound'),
+                        "Distance std [A]": details.get('distance_std'),
                     })
                 
                 df = pd.DataFrame(data)
                 df.to_excel(writer, sheet_name=bond_type, index=False)
+            if not pairs:
+                pd.DataFrame(columns=["Bond length [A]", "Average CN"]).to_excel(
+                    writer, sheet_name="Summary", index=False)
